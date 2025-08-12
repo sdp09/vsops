@@ -1,0 +1,100 @@
+# Custom queries for PostgreSQL performance metrics
+
+pg_custom_query_performance:
+  query: |
+    SELECT 
+      datname as database,
+      COALESCE(mean_time, 0) as avg_execution_time_ms,
+      COALESCE(total_time, 0) as total_execution_time_ms,
+      COALESCE(calls, 0) as total_calls,
+      COALESCE(rows, 0) as total_rows_processed,
+      query_type,
+      CASE 
+        WHEN calls > 0 THEN ROUND(total_time / calls, 2)
+        ELSE 0 
+      END as calculated_avg_time_ms
+    FROM (
+      SELECT 
+        d.datname,
+        CASE 
+          WHEN s.query ILIKE 'SELECT%' THEN 'SELECT'
+          WHEN s.query ILIKE 'INSERT%' THEN 'INSERT'
+          WHEN s.query ILIKE 'UPDATE%' THEN 'UPDATE'
+          WHEN s.query ILIKE 'DELETE%' THEN 'DELETE'
+          WHEN s.query ILIKE 'CREATE%' THEN 'CREATE'
+          WHEN s.query ILIKE 'ALTER%' THEN 'ALTER'
+          ELSE 'OTHER'
+        END as query_type,
+        s.mean_time,
+        s.total_time,
+        s.calls,
+        s.rows
+      FROM pg_stat_statements s
+      JOIN pg_database d ON d.oid = s.dbid
+      WHERE s.query NOT LIKE '%pg_stat%'
+        AND s.query NOT LIKE '%postgres_exporter%'
+        AND d.datname NOT IN ('postgres', 'template0', 'template1')
+        AND s.calls > 0
+    ) query_stats
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - query_type:
+        usage: "LABEL"
+        description: "Type of SQL query"
+    - avg_execution_time_ms:
+        usage: "GAUGE"
+        description: "Average query execution time in milliseconds"
+    - total_execution_time_ms:
+        usage: "GAUGE"
+        description: "Total execution time in milliseconds"
+    - total_calls:
+        usage: "GAUGE"
+        description: "Total number of query executions"
+    - total_rows_processed:
+        usage: "GAUGE"
+        description: "Total rows processed by queries"
+    - calculated_avg_time_ms:
+        usage: "GAUGE"
+        description: "Calculated average execution time per query"
+
+pg_custom_slow_queries:
+  query: |
+    SELECT 
+      datname as database,
+      usename as username,
+      EXTRACT(EPOCH FROM (now() - query_start)) as current_execution_seconds,
+      CASE 
+        WHEN EXTRACT(EPOCH FROM (now() - query_start)) > 300 THEN 'very_slow'
+        WHEN EXTRACT(EPOCH FROM (now() - query_start)) > 60 THEN 'slow' 
+        WHEN EXTRACT(EPOCH FROM (now() - query_start)) > 10 THEN 'medium'
+        ELSE 'fast'
+      END as query_speed_category,
+      CASE 
+        WHEN state = 'active' THEN 1
+        ELSE 0
+      END as is_running
+    FROM pg_stat_activity
+    WHERE state = 'active'
+      AND datname IS NOT NULL
+      AND query_start IS NOT NULL
+      AND query NOT LIKE '%pg_stat_activity%'
+      AND query NOT LIKE '%postgres_exporter%'
+      AND EXTRACT(EPOCH FROM (now() - query_start)) > 0
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - username:
+        usage: "LABEL"
+        description: "Username running the query"
+    - query_speed_category:
+        usage: "LABEL"
+        description: "Speed category of the query"
+    - current_execution_seconds:
+        usage: "GAUGE"
+        description: "Current execution time in seconds"
+    - is_running:
+        usage: "GAUGE"
+        description: "Whether query is currently running"

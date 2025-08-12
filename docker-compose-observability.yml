@@ -1,0 +1,169 @@
+services:
+  # PostgreSQL Exporter for main database
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: postgres_exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres123@postgresql_db:5432/observability_db?sslmode=disable"
+    command:
+      - --config.file=/etc/postgres_exporter/postgresql-queries.yml
+      - --collector.stat_statements
+    ports:
+      - "9187:9187"
+    volumes:
+      - ./postgres-exporter-configs/postgresql-queries.yml:/etc/postgres_exporter/postgresql-queries.yml:ro
+    networks:
+      - monitoring_network
+      - db_network
+    depends_on:
+      - postgresql_db
+    restart: unless-stopped
+
+  # PostgreSQL Exporter for mock Redshift
+  redshift-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: redshift_exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://redshift_user:redshift123@mock_redshift_db:5432/redshift_db?sslmode=disable"
+    command:
+      - --config.file=/etc/postgres_exporter/redshift-queries.yml
+      - --collector.stat_statements
+    ports:
+      - "9188:9187"
+    volumes:
+      - ./postgres-exporter-configs/redshift-queries.yml:/etc/postgres_exporter/redshift-queries.yml:ro
+    networks:
+      - monitoring_network
+      - db_network
+    depends_on:
+      - mock_redshift_db
+    restart: unless-stopped
+
+  # Victoria Metrics
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: victoria_metrics
+    ports:
+      - "8428:8428"
+    volumes:
+      - victoria_data:/victoria-metrics-data
+    command:
+      - "--storageDataPath=/victoria-metrics-data"
+      - "--httpListenAddr=:8428"
+      - "--retentionPeriod=30d"
+      - "--maxLabelsPerTimeseries=50"
+      - "--loggerLevel=INFO"
+    networks:
+      - monitoring_network
+    restart: unless-stopped
+
+  # Prometheus for scraping metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring_network
+    depends_on:
+      - victoria-metrics
+      - postgres-exporter
+      - redshift-exporter
+    restart: unless-stopped
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_PLUGINS_ENABLE_ALPHA=false
+      - GF_DEFAULT_INSTANCE_NAME=database-monitoring
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitoring_network
+    depends_on:
+      - victoria-metrics
+    restart: unless-stopped
+
+  # Database services (referenced from the first compose file)
+  postgresql_db:
+    image: postgres:15
+    container_name: postgresql_db
+    environment:
+      POSTGRES_DB: observability_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_HOST_AUTH_METHOD: md5
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+      - ./init-scripts/postgresql:/docker-entrypoint-initdb.d
+    networks:
+      - db_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d observability_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mock_redshift_db:
+    image: postgres:15
+    container_name: mock_redshift_db
+    environment:
+      POSTGRES_DB: redshift_db
+      POSTGRES_USER: redshift_user
+      POSTGRES_PASSWORD: redshift123
+      POSTGRES_HOST_AUTH_METHOD: md5
+    ports:
+      - "5439:5432"
+    volumes:
+      - redshift_data:/var/lib/postgresql/data
+      - ./init-scripts/redshift:/docker-entrypoint-initdb.d
+    networks:
+      - db_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U redshift_user -d redshift_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+
+volumes:
+  postgresql_data:
+    driver: local
+  redshift_data:
+    driver: local
+  victoria_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  db_network:
+    driver: bridge
+  monitoring_network:
+    driver: bridge
